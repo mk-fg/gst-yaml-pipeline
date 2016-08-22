@@ -69,6 +69,10 @@ class dmap(ChainMap):
 	def _set_attr(self, k, v):
 		self.__dict__[k] = v
 
+	def __iter__(self):
+		key_set = dict.fromkeys(set().union(*self.maps), True)
+		return filter(lambda k: key_set.pop(k, False), it.chain.from_iterable(self.maps))
+
 	def __getitem__(self, k):
 		k_maps = list()
 		for m in self.maps:
@@ -92,6 +96,9 @@ class dmap(ChainMap):
 	def __delitem__(self, k):
 		for m in self.maps:
 			if k in m: del m[k]
+
+str_or_list = lambda v: ([v] if not isinstance(
+	v or list(), (types.GeneratorType, list, tuple) ) else list(v or list()))
 
 
 
@@ -127,36 +134,73 @@ class GstPipe(object):
 
 
 	def create_pipeline(self):
-		g = self.graph = Gst.Pipeline.new(self.name)
+		g = Gst.Pipeline.new(self.name)
 
 		self.bus = g.get_bus()
 		self.bus.add_signal_watch()
 		self.bus.connect('message', self.on_bus_msg)
-		# self.bus.enable_sync_message_emission()
-		# self.bus.connect('sync-message', self.on_bus_msg)
 
-		def link_pad_delayed(b, a, pad):
-			pad_dst = b.get_compatible_pad(pad, pad.get_caps())
-			if not pad_dst: raise GstPipeError(b, a, pad)
-			pad.link(pad_dst)
-
-		e_last, n = None, 0
-		for p_name, p in self.conf.items():
+		e_link, n, es = None, 0, dict()
+		for e_name, p in self.conf.items():
 			if not p: p = dict()
 
-			# Create
-			e_name = p.get('e') or p_name
-			e = Gst.ElementFactory.make(p_name, e_name)
+			### Create
+
+			p_name = e_name.rsplit('/', 1)[0]
+			if p.get('name'): e_name = p[name]
+			self.log.debug('[{}] Creating new element...', e_name)
+			if e_name in es:
+				self.log.error('Duplicate name for element: {!r} (plugin: {})', e_name, p_name)
+				raise GstPipeError('create-name', e_name, p_name)
+			e = es[e_name] = Gst.ElementFactory.make(p_name, e_name)
+			if not e:
+				self.log.error('Failed to create element: {!r} (plugin: {})', e_name, p_name)
+				raise GstPipeError('create', e_name, p_name)
 			for k, v in (p.get('props') or dict()).items(): e.set_property(k, v)
 			g.add(e)
 
-			# Link
-			if e_last is not None:
-				if p.get('link-delayed'):
-					e_last.connect('pad-added', ft.partial(link_pad_delayed, e))
-				else: e_last.link(e)
-			e_last, n = e, n + 1
+			### Link
 
+			links = p.get('link', True)
+			links = dmap(
+				dmap(down=links) if not isinstance(links, Mapping) else links,
+				dict(down=True, up=None, delayed=False) )
+			self.log.debug(
+				'[{}] Linking parameters {} (upstream link: {})...',
+				e_name, links, GObjRepr.fmt(e_link) )
+
+			if e_link:
+				assert not links.delayed, [e_name, links] # XXX: not implemented
+				link_repr = dict(a=GObjRepr.fmt(e_link), b=GObjRepr.fmt(e))
+				self.log.debug('Link {a} -> {b}', **link_repr)
+				if not e_link.link(e):
+					self.log.error( 'Failed to create link: {a} -> {b}'
+						' (element: {e}, plugin: {p})', e=e_name, p=p_name, **link_repr )
+					raise GstPipeError('link-downstream', e_name, p_name, p, e_link, e)
+				e_link = None
+
+			if links.down is True: e_link = e
+			for pad_dir, swap, specs in [('>', False, links.down), ('<', True, links.up)]:
+				if specs is True: continue
+				for spec in str_or_list(specs):
+					pad_a = pad_b = None
+					if pad_dir in spec: pad_a, spec = spec.split('<', 1)
+					if '.' in spec: spec, pad_b = spec.rsplit('.', 1)
+					a, b = e, es[spec]
+					if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
+					link_repr = dict( a=GObjRepr.fmt(a),
+						ap=pad_a or '(any)', b=GObjRepr.fmt(b), bp=pad_b or '(any)' )
+					self.log.debug('Link pads {a}.{ap} -> {b}.{bp}', **link_repr)
+					if not a.link_pads(pad_a, b, pad_b):
+						self.log.error(
+							'Failed to create link: {a}.{ap} -> {b}.{bp} ({d}, element: {e}, plugin: {p})',
+							d='downstream' if not swap else 'upstream', e=e_name, p=p_name, **link_repr )
+						raise GstPipeError('link-pads', e_name, p_name, p, a, pad_a, b, pad_b)
+					assert not links.delayed, [e_name, links] # XXX: not implemented
+
+			n += 1
+
+		self.graph = g
 		self.log.debug('Created gst pipeline {!r} ({} elements)', self.name, n)
 
 
@@ -198,6 +242,12 @@ class GstPipe(object):
 			self.log.debug(
 				'Message [{m.t}]: {attrs} (src: {src})',
 				m=msg, src=GObjRepr.fmt(msg.src), attrs=attrs )
+		if msg.t == 'error':
+			self.log.error( 'Stopping loop due to'
+				' error: {} (src: {})', msg.gerror, GObjRepr.fmt(msg.src) )
+			self.log.debug( 'Error debug info:'
+				'\n{hr}\n{i}\n{hr}', i=(msg.debug or '').rstrip('\n'), hr='- '*25 )
+			self.loop.quit()
 
 
 
