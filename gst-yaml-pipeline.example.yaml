@@ -1,13 +1,13 @@
-
 ## Example:
-# plugin-name:
-#   e: element-name
+#
+# plugin-name: (value is optional, as is any keys in there)
+#
+#   e: element-name (defaults to plugin-name)
 #   link-delayed: false
+#
 #   props:
 #     prop-name: prop-value
 
 audiotestsrc:
-
 audioconvert:
-
 autoaudiosink:

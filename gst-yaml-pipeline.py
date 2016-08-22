@@ -26,7 +26,6 @@ class LogStyleAdapter(logging.LoggerAdapter):
 
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 
-
 class GObjRepr(object):
 	_re = re.compile(r'^<.*\((.*?) at 0x(\S+)\)>$')
 	def __init__(self, m): self.m = m
@@ -37,7 +36,6 @@ class GObjRepr(object):
 		m = cls._re.search(str(gobj))
 		return gobj if not m else cls(m)
 
-
 def yaml_load(stream, dict_cls=OrderedDict, loader_cls=yaml.SafeLoader):
 	class CustomLoader(loader_cls): pass
 	def construct_mapping(loader, node):
@@ -46,7 +44,6 @@ def yaml_load(stream, dict_cls=OrderedDict, loader_cls=yaml.SafeLoader):
 	CustomLoader.add_constructor(
 		yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping )
 	return yaml.load(stream, CustomLoader)
-
 
 class dmap(ChainMap):
 
@@ -95,6 +92,7 @@ class dmap(ChainMap):
 	def __delitem__(self, k):
 		for m in self.maps:
 			if k in m: del m[k]
+
 
 
 class GstPipeError(Exception): pass
@@ -202,6 +200,7 @@ class GstPipe(object):
 				m=msg, src=GObjRepr.fmt(msg.src), attrs=attrs )
 
 
+
 def main(args=None):
 	import argparse
 	parser = argparse.ArgumentParser(
@@ -224,6 +223,5 @@ def main(args=None):
 	finally: src.close()
 
 	with GstPipe(opts.name, conf) as pipe: pipe.run()
-
 
 if __name__ == '__main__': sys.exit(main())
