@@ -18,71 +18,92 @@ top of configurable pipeline.
 Usage
 -----
 
-Example config (gst-yaml-pipeline.example.yaml)::
+See example config file ``gst-yaml-pipeline.example.yaml`` for detailed
+format/structure description.
 
-  ## Example:
-  #
-  # element-name: (value is optional, as is any keys in there)
-  #
-  #   name: # overrides element-name above
-  #   plugin-name: # same as pre-/ element-name by default
-  #
-  #   link: # can be non-map value, to interpret as "down" option
-  #     # "down" can be:
-  #     #  - true - auto-link element to the next (downstream) one (default)
-  #     #  - [src-pad-name>]dst-element-name[.dst-pad-name] (can be list)
-  #     #  - false - don't link from this section
-  #     down: true
-  #     up: [dst-pad-name<]src-element-name[.src-pad-name] # pad(s) to add link(s) from (can be list)
-  #     delayed: false # delay linking until pads will be available (for e.g. automagic stuff)
-  #
-  #   props:
-  #     prop-name: prop-value
+Examples:
 
-::
+* Simple flat pipeline::
 
-  ## Simple working pipeline:
+    audiotestsrc:
+    audioconvert:
+    autoaudiosink:
 
-  audiotestsrc:
-  audioconvert:
-  autoaudiosink:
+  Here all elements are linked source-to-sink in same order as they're
+  specified, with no extra properties configured.
 
-::
+* More complex nested rtp-streaming pipeline::
 
-  ## More complex rtp-streaming pipeline:
+    rtpbin:
+      pads:
+        send_rtp_sink_0:
+          pipe:
+            audiotestsrc:
+            vorbisenc:
+            rtpvorbispay:
+        recv_rtcp_sink_0: # rtcp feedback from client(s)
+          pipe:
+            udpsrc/rtcp:
+              props:
+                port: 5007
+        send_rtp_src_0:
+          pipe:
+            udpsink/rtp:
+              props:
+                # host: localhost
+                port: 5002
+        send_rtcp_src_0:
+          pipe:
+            udpsink/rtcp:
+              props:
+                # host: localhost
+                port: 5003
+                sync: false
+                async: false
 
-  rtpbin:
-    link: false
+  A tree with "rtpbin" pads connected to audio source/encoding pipeline and UDP
+  inputs/outputs, each with their respective configuration.
 
-  audiotestsrc:
-  vorbisenc:
-  rtpvorbispay:
-    link: rtpbin.send_rtp_sink_0
+  Note that format/structure of stuff under "pipe:" follows exactly same rules
+  as top-level config, just gets linked to pad which it's defined under in the end.
 
-  udpsink/rtp:
-    props:
-      # host: localhost
-      port: 5002
-    link:
-      up: rtpbin.send_rtp_src_0
-      down: false
+* Exactly same pipeline as above, but flattened::
 
-  udpsink/rtcp:
-    props:
-      # host: localhost
-      port: 5003
-      sync: false
-      async: false
-    link:
-      up: rtpbin.send_rtcp_src_0
-      down: false
+    rtpbin:
+      link: false
 
-  udpsrc/rtcp:
-    props:
-      port: 5007
-    link: rtpbin.recv_rtcp_sink_0
+    audiotestsrc:
+    vorbisenc:
+    rtpvorbispay:
+      link: rtpbin.send_rtp_sink_0
 
-Invocation: ``./gst-yaml-pipeline.py --debug gst-yaml-pipeline.example.yaml``
+    udpsink/rtp:
+      props:
+        # host: localhost
+        port: 5002
+      link:
+        up: rtpbin.send_rtp_src_0
+        down: false
+
+    udpsink/rtcp:
+      props:
+        # host: localhost
+        port: 5003
+        sync: false
+        async: false
+      link:
+        up: rtpbin.send_rtcp_src_0
+        down: false
+
+    udpsrc/rtcp:
+      props:
+        port: 5007
+      link: rtpbin.recv_rtcp_sink_0
+
+  Demonstrates linking in arbitrary (non-linear and non-nested) fashion between
+  any elements.
+
+Invocation: ``./gst-yaml-pipeline.py --debug my-pipeline.yaml``
 
 | Enable gst debug messages: ``GST_DEBUG='*:4' GST_DEBUG_NO_COLOR=1 ./gst-yaml-pipeline.py ...``
 | (see also ``ENVIRONMENT VARIABLES`` section in ``man gst-launch-1.0``)

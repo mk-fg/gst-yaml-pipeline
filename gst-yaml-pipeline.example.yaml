@@ -1,4 +1,9 @@
-## Example:
+### Examples:
+#
+## - All the "...-name" and "...-value" below are placeholders
+## - Each "element-name" must be unique
+#
+## Flat composition of elements
 #
 # element-name: (value is optional, as is any keys in there)
 #
@@ -8,24 +13,82 @@
 #   link: # can be non-map value, to interpret as "down" option
 #     # "down" can be:
 #     #  - true - auto-link element to the next (downstream) one (default)
-#     #  - [src-pad-name>]dst-element-name[.dst-pad-name] (can be list)
+#     #  - "[src-pad-name>]dst-element-name[.dst-pad-name]" (can be list)
 #     #  - false - don't link from this section
 #     down: true
-#     up: [dst-pad-name<]src-element-name[.src-pad-name] # pad(s) to add link(s) from (can be list)
+#     up: "[dst-pad-name<]src-element-name[.src-pad-name]" # pad(s) to add link(s) from (can be list)
 #     delayed: false # delay linking until pads will be available (for e.g. automagic stuff)
 #
 #   props:
 #     prop-name: prop-value
-
-
-## Simple working pipeline:
+#     ...
 #
-# audiotestsrc:
-# audioconvert:
-# autoaudiosink:
+# element-name: ... # will be linked as a sink to element above due to "link.down=true"
+# ...
+#
+## Nested linking
+## Can be combined with flat one above, i.e. use both "link" and "pad" options
+#
+# element-name:
+#   name: ...
+#   plugin-name: ...
+#   props: ...
+#   pads:
+#     pad-name:
+#       # "link" can be either of (in relation to elements in "pipe:" below):
+#       #  - "down" or "up" - simply link "to first" or "from last" module of "pipe:"
+#       #  - "auto" - check if pad name has "sink" or "src" in it, otherwise default to "down"
+#       #  - ">[dst-element-name][.dst-pad-name]" - default dst is the first elm
+#       #  - "<[src-element-name][.src-pad-name]" - default src is the last one
+#       link: auto # default, if omitted
+#       pipe: # can have flat or nested element composition inside as well
+#         element-name: ...
+#         element-name: ...
+#         ...
+#         element-name: ... # will be linked to pad above due to "type: sink"
+#     pad-name: ...
+#     ...
+# ... # more downstream or manually linked elements, as with flat example above
 
 
-## More complex rtp-streaming pipeline:
+## Simple flat pipeline:
+
+audiotestsrc:
+audioconvert:
+autoaudiosink:
+
+
+## More complex nested rtp-streaming pipeline:
+
+rtpbin:
+  pads:
+    send_rtp_sink_0:
+      pipe:
+        audiotestsrc:
+        vorbisenc:
+        rtpvorbispay:
+    recv_rtcp_sink_0: # rtcp feedback from client(s)
+      pipe:
+        udpsrc/rtcp:
+          props:
+            port: 5007
+    send_rtp_src_0:
+      pipe:
+        udpsink/rtp:
+          props:
+            # host: localhost
+            port: 5002
+    send_rtcp_src_0:
+      pipe:
+        udpsink/rtcp:
+          props:
+            # host: localhost
+            port: 5003
+            sync: false
+            async: false
+
+
+## Exactly same pipeline as above, but flattened
 
 rtpbin:
   link: false

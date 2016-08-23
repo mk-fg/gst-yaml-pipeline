@@ -133,22 +133,49 @@ class GstPipe(object):
 	def __del__(self): self.close()
 
 
-	def create_pipeline(self):
-		g = Gst.Pipeline.new(self.name)
+	def create_link(self, a, b, pad_a=None, pad_b=None, delay=False, err_info=''):
+		assert not delay, [a, b, pad_a, pad_b, err_info] # XXX: not implemented
+		link_repr = '{}.{} -> {}.{}'.format(
+			GObjRepr.fmt(a), pad_a or '(any)',
+			GObjRepr.fmt(b), pad_b or '(any)' )
+		self.log.debug('Link {}', link_repr)
+		if a.link_pads(pad_a, b, pad_b): return
+		err_dict = dmap(err_info or dict(), dict.fromkeys('dept'))
+		if err_info:
+			err_info = list()
+			if err_dict.d: err_info.append('downstream' if err_dict.d else 'upstream')
+			if err_dict.e: err_info.append('element: {}'.format(err_dict.e))
+			if err_dict.p: err_info.append('plugin: {}'.format(err_dict.p))
+			err_info = ' ({})'.format(', '.join(err_info))
+		self.log.error('Failed to create link: {}{}', link_repr, err_info)
+		err_t = 'link'
+		if err_dict.t: err_t += '-{}'.format(err_dict.t)
+		raise GstPipeError(err_t, err_dict.e, err_dict.p, a, pad_a, b, pad_b)
 
-		self.bus = g.get_bus()
+
+	def create_pipeline(self):
+		self.graph = Gst.Pipeline.new(self.name)
+		self.bus = self.graph.get_bus()
 		self.bus.add_signal_watch()
 		self.bus.connect('message', self.on_bus_msg)
+		es = dict()
+		self.create_pipe(self.conf, es, name=[self.name])
+		self.log.debug('Created gst pipeline {!r} (elements: {})', self.name, len(es))
 
-		e_link, n, es = None, 0, dict()
-		for e_name, p in self.conf.items():
+
+	def create_pipe(self, conf, es, e_link_ds=None, name=None):
+		'''Create and link sub-assembly of sequential
+			elements, including anything nested inside these.'''
+
+		es_len0, ea, ab = len(es), None, None
+		for e_name, p in conf.items():
 			if not p: p = dict()
 
 			### Create
 
 			p_name = e_name.rsplit('/', 1)[0]
-			if p.get('name'): e_name = p[name]
-			self.log.debug('[{}] Creating new element...', e_name)
+			if p.get('name'): e_name = p['name']
+			self.log.debug('Creating new element: {}', e_name)
 			if e_name in es:
 				self.log.error('Duplicate name for element: {!r} (plugin: {})', e_name, p_name)
 				raise GstPipeError('create-name', e_name, p_name)
@@ -157,29 +184,26 @@ class GstPipe(object):
 				self.log.error('Failed to create element: {!r} (plugin: {})', e_name, p_name)
 				raise GstPipeError('create', e_name, p_name)
 			for k, v in (p.get('props') or dict()).items(): e.set_property(k, v)
-			g.add(e)
+			self.graph.add(e)
+			eb, ea = e, e if not ea else ea
 
 			### Link
 
-			links = p.get('link', True)
+			links = p.get('link') or True
 			links = dmap(
 				dmap(down=links) if not isinstance(links, Mapping) else links,
 				dict(down=True, up=None, delayed=False) )
-			self.log.debug(
-				'[{}] Linking parameters {} (upstream link: {})...',
-				e_name, links, GObjRepr.fmt(e_link) )
+			# self.log.debug(
+			# '[{}] Flat-linking parameters {} (downstream link: {})...',
+			# e_name, links, GObjRepr.fmt(e_link_ds) )
 
-			if e_link:
+			if e_link_ds:
 				assert not links.delayed, [e_name, links] # XXX: not implemented
-				link_repr = dict(a=GObjRepr.fmt(e_link), b=GObjRepr.fmt(e))
-				self.log.debug('Link {a} -> {b}', **link_repr)
-				if not e_link.link(e):
-					self.log.error( 'Failed to create link: {a} -> {b}'
-						' (element: {e}, plugin: {p})', e=e_name, p=p_name, **link_repr )
-					raise GstPipeError('link-downstream', e_name, p_name, p, e_link, e)
-				e_link = None
+				self.create_link( e_link_ds, e, delay=links.delayed,
+					err_info=dict(e=e_name, p=p_name, t='downstream') )
+				e_link_ds = None
 
-			if links.down is True: e_link = e
+			if links.down is True: e_link_ds = e
 			for pad_dir, swap, specs in [('>', False, links.down), ('<', True, links.up)]:
 				if specs is True: continue
 				for spec in str_or_list(specs):
@@ -188,23 +212,40 @@ class GstPipe(object):
 					if '.' in spec: spec, pad_b = spec.rsplit('.', 1)
 					a, b = e, es[spec]
 					if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
-					link_repr = dict( a=GObjRepr.fmt(a),
-						ap=pad_a or '(any)', b=GObjRepr.fmt(b), bp=pad_b or '(any)' )
-					self.log.debug('Link pads {a}.{ap} -> {b}.{bp}', **link_repr)
-					if not a.link_pads(pad_a, b, pad_b):
-						self.log.error(
-							'Failed to create link: {a}.{ap} -> {b}.{bp} ({d}, element: {e}, plugin: {p})',
-							d='downstream' if not swap else 'upstream', e=e_name, p=p_name, **link_repr )
-						raise GstPipeError('link-pads', e_name, p_name, p, a, pad_a, b, pad_b)
-					assert not links.delayed, [e_name, links] # XXX: not implemented
+					self.create_link( a, b, pad_a, pad_b, delay=links.delayed,
+						err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
 
-			n += 1
+			### Pads and their sub-pipes
 
-		self.graph = g
-		self.log.debug('Created gst pipeline {!r} ({} elements)', self.name, n)
+			pads = p.get('pads', dict())
+			for pad_name, pad in pads.items():
+				link_ds, pipe_ends = self.create_pipe(
+					pad.get('pipe', dict()), es, name=name + [e_name, pad_name] )
+				link = pad.get('link') or 'auto'
+				if link == 'auto': link = 'up' if re.search(r'([-_]|\b)sink([-_]|\b)', pad_name) else 'down'
+				link = {'<': 'up', '>': 'down'}.get(link, link)
+				if link == 'up':
+					swap, a, pad_a, b, pad_b = True, e, pad_name, pipe_ends[1], None
+				elif link == 'down':
+					swap, a, pad_a, b, pad_b = False, e, pad_name, pipe_ends[0], None
+				else:
+					m = re.search(r'^([<>])([^.]*)(?:\.(.*))$', link)
+					if not m: raise ValueError('Invalid pad-link spec: {!r}', link)
+					a, pad_a, (swap, b, pad_b) = e, pad_name, m.groups()
+					swap, b = '><'.index(swap), es[b] if b else pipe_ends[swap == '<']
+				if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
+				self.create_link( a, b, pad_a, pad_b, delay=links.delayed,
+					err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
+
+		if len(name) > 1:
+			self.log.debug( 'Created sub-pipeline'
+				' {!r} (elements: {})', '.'.join(name), len(es) - es_len0 )
+
+		return e_link_ds, (ea, eb)
 
 
 	def run(self):
+		self.log.debug('Starting pipeline...')
 		self.graph.set_state(Gst.State.PLAYING)
 		self.log.debug('Entering GLib loop...')
 		self.loop.run()
@@ -261,6 +302,8 @@ def main(args=None):
 	parser.add_argument('-n', '--name', metavar='name',
 		default='yaml-pipe', help='Gst pipeline name (default: %(default)s).')
 
+	parser.add_argument('-y', '--dry-run',
+		action='store_true', help='Create pipeline and exit, instead of running it.')
 	parser.add_argument('-d', '--debug', action='store_true', help='Verbose operation mode.')
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
@@ -272,6 +315,7 @@ def main(args=None):
 	try: conf = yaml_load(src, dmap)
 	finally: src.close()
 
-	with GstPipe(opts.name, conf) as pipe: pipe.run()
+	with GstPipe(opts.name, conf) as pipe:
+		if not opts.dry_run: pipe.run()
 
 if __name__ == '__main__': sys.exit(main())
