@@ -22,7 +22,7 @@
 #     #  - false - don't link from this section
 #     down: true
 #     up: "[dst-pad-name<]src-element-name[.src-pad-name]" # pad(s) to add link(s) from (can be list)
-#     delayed: false # delay linking until pads will be available (for e.g. automagic stuff)
+#     delay: false # delay linking until pads will be available (for e.g. automagic stuff)
 #
 #   props:
 #     prop-name: prop-value
@@ -40,12 +40,19 @@
 #   props: ...
 #   pads:
 #     pad-name:
+#
 #       # "link" can be either of (in relation to elements in "pipe:" below):
 #       #  - "down" or "up" - simply link "to first" or "from last" module of "pipe:"
 #       #  - "auto" - check if pad name has "sink" or "src" in it, otherwise default to "down"
 #       #  - ">[dst-element-name][.dst-pad-name]" - default dst is the first elm
 #       #  - "<[src-element-name][.src-pad-name]" - default src is the last one
 #       link: auto # default, if omitted
+#       link_caps: # caps to filter link by
+#
+#       # "link_delay" delays linking until pad will be available,
+#       #  and is auto-set for pads with "%" in the name, like "recv_rtp_src_%u_%u_%u"
+#       link_delay: false
+#
 #       pipe: # can have flat or nested element composition inside as well
 #         element-name: ...
 #         element-name: ...
@@ -63,38 +70,41 @@ audioconvert:
 autoaudiosink:
 
 
-## More complex nested rtp-streaming pipeline:
+## More complex nested multicast-rtp-streaming pipeline:
 
 rtpbin:
   pads:
-    send_rtp_sink_0:
+    send_rtp_sink_0: # no need to specify "link: ..." if sink/src is in pad-name
       pipe:
         audiotestsrc:
+        # vorbisenc:
+        # rtpvorbispay:
         opusenc:
-        rtpopuspay:
+        rtpopuspay: # due to "link: up", pad will be linked-to from this (last) element
     recv_rtcp_sink_0: # rtcp feedback from receiver(s)
       pipe:
         udpsrc/rtcp:
           props:
+            address: 224.0.0.56
             port: 5007
     send_rtp_src_0:
       pipe:
         udpsink/rtp:
           props:
-            # host: localhost
+            host: 224.0.0.56 # multicast - "address" MUST be specified on receiver
             port: 5002
           print_caps: true # will print negotiated caps to be used on receiver(s)
     send_rtcp_src_0:
       pipe:
         udpsink/rtcp:
           props:
-            # host: localhost
+            host: 224.0.0.56
             port: 5003
-            sync: false
-            async: false
+            # sync: false
+            # async: false
 
 
-## Exactly same pipeline as above, but flattened
+## Roughly same pipeline as above, but flattened
 
 rtpbin:
   link: false
@@ -114,8 +124,6 @@ udpsink/rtp:
 udpsink/rtcp:
   props:
     port: 5003
-    sync: false
-    async: false
   link:
     up: rtpbin.send_rtcp_src_0
     down: false
@@ -124,3 +132,46 @@ udpsrc/rtcp:
   props:
     port: 5007
   link: rtpbin.recv_rtcp_sink_0
+
+
+## Nested rtpbin multicast receiver pipeline
+
+rtpbin:
+  pads:
+
+    recv_rtp_src_%u_%u_%u: # automatically used as a template for delayed linking
+      pipe:
+        rtpopusdepay:
+        opusdec:
+        # rtpvorbisdepay:
+        # vorbisdec:
+        alsasink:
+
+    send_rtcp_src_0:
+      pipe:
+        udpsink/rtcp:
+          props:
+            host: 224.0.0.56
+            port: 5007
+            # sync: false
+            # async: false
+
+    recv_rtp_sink_0:
+      pipe:
+        udpsrc/rtp:
+          props:
+            address: 224.0.0.56
+            port: 5002
+            # See caps output from "print_caps: true" logging on sender
+            caps: >
+              application/x-rtp, media=(string)audio, clock-rate=(int)48000,
+              encoding-name=(string)X-GST-OPUS-DRAFT-SPITTKA-00,
+              payload=(int)96, ssrc=(uint)2267026722,
+              timestamp-offset=(uint)2546368571, seqnum-offset=(uint)8034
+
+    recv_rtcp_sink_0:
+      pipe:
+        udpsrc/rtcp:
+          props:
+            address: 224.0.0.56
+            port: 5003

@@ -132,13 +132,26 @@ class GstPipe(object):
 	def __del__(self): self.close()
 
 
-	def create_link(self, a, b, pad_a=None, pad_b=None, delay=False, err_info=''):
-		assert not delay, [a, b, pad_a, pad_b, err_info] # XXX: not implemented
-		link_repr = '{}.{} -> {}.{}'.format(
+	def _create_link_cb(self, a, pad_new, pad_check, b, pad_b, link_kws):
+		if pad_check != pad_new.get_pad_template().name_template:
+			self.log.debug(
+				'Skipping non-matching pad-added spec (link: {} -> {}): {} != {}',
+				GObjRepr.fmt(a), GObjRepr.fmt(b), pad_new, pad_check )
+			return
+		self.create_link(a, b, pad_new.get_name(), pad_b, **link_kws)
+
+	def create_link(self, a, b, pad_a=None, pad_b=None, delay=False, caps=None, err_info=''):
+		if delay:
+			a.connect( 'pad-added', self._create_link_cb,
+				pad_a, b, pad_b, dict(caps=caps, err_info=err_info) )
+			return
+		link_repr = '{}.{} -> {}.{}{}'.format(
 			GObjRepr.fmt(a), pad_a or '(any)',
-			GObjRepr.fmt(b), pad_b or '(any)' )
+			GObjRepr.fmt(b), pad_b or '(any)',
+			' [{}]'.format(caps.strip()) if caps else '' )
 		self.log.debug('Link {}', link_repr)
-		if a.link_pads(pad_a, b, pad_b): return
+		if caps: caps = Gst.caps_from_string(caps.strip())
+		if a.link_pads_filtered(pad_a, b, pad_b, caps): return
 		err_dict = dmap(err_info or dict(), dict.fromkeys('dept'))
 		if err_info:
 			err_info = list()
@@ -149,7 +162,7 @@ class GstPipe(object):
 		self.log.error('Failed to create link: {}{}', link_repr, err_info)
 		err_t = 'link'
 		if err_dict.t: err_t += '-{}'.format(err_dict.t)
-		raise GstPipeError(err_t, err_dict.e, err_dict.p, a, pad_a, b, pad_b)
+		raise GstPipeError(err_t, err_dict.e, err_dict.p, a, pad_a, b, pad_b, caps)
 
 
 	def create_pipeline(self):
@@ -183,7 +196,9 @@ class GstPipe(object):
 			if not e:
 				self.log.error('Failed to create element: {!r} (plugin: {})', e_name, p_name)
 				raise GstPipeError('create', e_name, p_name)
-			for k, v in (p.get('props') or dict()).items(): e.set_property(k, v)
+			for k, v in (p.get('props') or dict()).items():
+				if k == 'caps': v = Gst.caps_from_string(v.strip())
+				e.set_property(k, v)
 			self.graph.add(e)
 			eb, ea = e, e if not ea else ea
 
@@ -192,14 +207,13 @@ class GstPipe(object):
 			links = p.get('link') or True
 			links = dmap(
 				dmap(down=links) if not isinstance(links, Mapping) else links,
-				dict(down=True, up=None, delayed=False) )
+				dict(down=True, up=None, delay=False) )
 			# self.log.debug(
 			# '[{}] Flat-linking parameters {} (downstream link: {})...',
 			# e_name, links, GObjRepr.fmt(e_link_ds) )
 
 			if e_link_ds:
-				assert not links.delayed, [e_name, links] # XXX: not implemented
-				self.create_link( e_link_ds, e, delay=links.delayed,
+				self.create_link( e_link_ds, e, delay=links.delay,
 					err_info=dict(e=e_name, p=p_name, t='downstream') )
 				e_link_ds = None
 
@@ -212,7 +226,7 @@ class GstPipe(object):
 					if '.' in spec: spec, pad_b = spec.rsplit('.', 1)
 					a, b = e, self.es[spec]
 					if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
-					self.create_link( a, b, pad_a, pad_b, delay=links.delayed,
+					self.create_link( a, b, pad_a, pad_b, delay=links.delay,
 						err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
 
 			### Pads and their sub-pipes
@@ -234,8 +248,9 @@ class GstPipe(object):
 					a, pad_a, (swap, b, pad_b) = e, pad_name, m.groups()
 					swap, b = '><'.index(swap), self.es[b] if b else pipe_ends[swap == '<']
 				if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
-				self.create_link( a, b, pad_a, pad_b, delay=links.delayed,
-					err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
+				delay = pad.get('link_delay') or (isinstance(pad_a, str) and '%' in pad_a)
+				self.create_link( a, b, pad_a, pad_b, caps=pad.get('link_caps'),
+					delay=delay, err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
 
 			pads = p.get('print_caps')
 			if pads: self.es_print_caps.append((e, pads))
@@ -260,18 +275,23 @@ class GstPipe(object):
 	def on_bus_msg(self, bus, msg_raw):
 		if not self._bus_msg_parse:
 			p = dict()
+			ret_list_wrap = lambda args,ret: [ret] if len(args) == 1 else ret
 			for k, args in dict(
 					state_changed=('old', 'new', 'pending'),
 					stream_status=('type', 'owner'),
-					error=('gerror', 'debug'), eos=None ).items():
+					async_done=('running_time',),
+					new_clock=('clock',),
+					error=('gerror', 'debug'),
+					stream_start=None, eos=None ).items():
 				t = getattr(Gst.MessageType, k.upper())
 				p[t] = (lambda msg: None) if not args else\
 					( lambda msg,func='parse_{}'.format(k),args=args:
-						(args, zip(args, getattr(msg, func)())) )
+						(args, zip(args, ret_list_wrap(args, getattr(msg, func)()))) )
 			def _bus_msg_parse(msg_raw):
 				if msg_raw.type not in p: msg = dmap(raw=msg_raw)
 				else:
-					msg_args, msg = p[msg_raw.type](msg_raw)
+					msg = p[msg_raw.type](msg_raw)
+					msg_args, msg = msg if msg else [tuple(), dict()]
 					msg = dmap((k, v if not isinstance( v,
 						GObject.GEnum ) else v.value_nick) for k, v in msg)
 					msg._set_attr('_args', msg_args)
@@ -282,7 +302,8 @@ class GstPipe(object):
 		msg = self._bus_msg_parse(msg_raw)
 		if self.log.isEnabledFor(logging.DEBUG): # to avoid formatting stuff
 			attrs = getattr(msg, '_args', None)
-			attrs = dict((k, GObjRepr.fmt(msg[k])) for k in attrs) if attrs else msg.raw
+			attrs = msg.raw if attrs is None else\
+				dict((k, GObjRepr.fmt(msg[k])) for k in attrs)
 			self.log.debug(
 				'Message [{m.t}]: {attrs} (src: {src})',
 				m=msg, src=GObjRepr.fmt(msg.src), attrs=attrs )
@@ -332,7 +353,7 @@ def main(args=None):
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
 	global log
-	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.WARNING)
+	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.INFO)
 	log = get_logger('main')
 
 	src = sys.stdin if not opts.conf else open(opts.conf)
