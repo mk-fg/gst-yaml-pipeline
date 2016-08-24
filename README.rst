@@ -55,7 +55,7 @@ Examples:
             audiotestsrc:
             vorbisenc:
             rtpvorbispay:
-        recv_rtcp_sink_0: # rtcp feedback from client(s)
+        recv_rtcp_sink_0: # rtcp feedback from receiver(s)
           pipe:
             udpsrc/rtcp:
               props:
@@ -66,6 +66,7 @@ Examples:
               props:
                 # host: localhost
                 port: 5002
+              print_caps: true # will print caps to be used on receiver(s)
         send_rtcp_src_0:
           pipe:
             udpsink/rtcp:
@@ -93,7 +94,6 @@ Examples:
 
     udpsink/rtp:
       props:
-        # host: localhost
         port: 5002
       link:
         up: rtpbin.send_rtp_src_0
@@ -101,7 +101,6 @@ Examples:
 
     udpsink/rtcp:
       props:
-        # host: localhost
         port: 5003
         sync: false
         async: false

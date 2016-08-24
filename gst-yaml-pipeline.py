@@ -158,16 +158,16 @@ class GstPipe(object):
 		self.bus = self.graph.get_bus()
 		self.bus.add_signal_watch()
 		self.bus.connect('message', self.on_bus_msg)
-		es = dict()
-		self.create_pipe(self.conf, es, name=[self.name])
-		self.log.debug('Created gst pipeline {!r} (elements: {})', self.name, len(es))
+		self.es, self.es_print_caps = dict(), list()
+		self.create_pipe(self.conf, name=[self.name])
+		self.log.debug('Created gst pipeline {!r} (elements: {})', self.name, len(self.es))
 
 
-	def create_pipe(self, conf, es, e_link_ds=None, name=None):
+	def create_pipe(self, conf, e_link_ds=None, name=None):
 		'''Create and link sub-assembly of sequential
 			elements, including anything nested inside these.'''
 
-		es_len0, ea, ab = len(es), None, None
+		es_len0, ea, ab = len(self.es), None, None
 		for e_name, p in conf.items():
 			if not p: p = dict()
 
@@ -176,10 +176,10 @@ class GstPipe(object):
 			p_name = e_name.rsplit('/', 1)[0]
 			if p.get('name'): e_name = p['name']
 			self.log.debug('Creating new element: {}', e_name)
-			if e_name in es:
+			if e_name in self.es:
 				self.log.error('Duplicate name for element: {!r} (plugin: {})', e_name, p_name)
 				raise GstPipeError('create-name', e_name, p_name)
-			e = es[e_name] = Gst.ElementFactory.make(p_name, e_name)
+			e = self.es[e_name] = Gst.ElementFactory.make(p_name, e_name)
 			if not e:
 				self.log.error('Failed to create element: {!r} (plugin: {})', e_name, p_name)
 				raise GstPipeError('create', e_name, p_name)
@@ -210,7 +210,7 @@ class GstPipe(object):
 					pad_a = pad_b = None
 					if pad_dir in spec: pad_a, spec = spec.split('<', 1)
 					if '.' in spec: spec, pad_b = spec.rsplit('.', 1)
-					a, b = e, es[spec]
+					a, b = e, self.es[spec]
 					if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
 					self.create_link( a, b, pad_a, pad_b, delay=links.delayed,
 						err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
@@ -220,7 +220,7 @@ class GstPipe(object):
 			pads = p.get('pads', dict())
 			for pad_name, pad in pads.items():
 				link_ds, pipe_ends = self.create_pipe(
-					pad.get('pipe', dict()), es, name=name + [e_name, pad_name] )
+					pad.get('pipe', dict()), name=name + [e_name, pad_name] )
 				link = pad.get('link') or 'auto'
 				if link == 'auto': link = 'up' if re.search(r'([-_]|\b)sink([-_]|\b)', pad_name) else 'down'
 				link = {'<': 'up', '>': 'down'}.get(link, link)
@@ -232,14 +232,17 @@ class GstPipe(object):
 					m = re.search(r'^([<>])([^.]*)(?:\.(.*))$', link)
 					if not m: raise ValueError('Invalid pad-link spec: {!r}', link)
 					a, pad_a, (swap, b, pad_b) = e, pad_name, m.groups()
-					swap, b = '><'.index(swap), es[b] if b else pipe_ends[swap == '<']
+					swap, b = '><'.index(swap), self.es[b] if b else pipe_ends[swap == '<']
 				if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
 				self.create_link( a, b, pad_a, pad_b, delay=links.delayed,
 					err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
 
+			pads = p.get('print_caps')
+			if pads: self.es_print_caps.append((e, pads))
+
 		if len(name) > 1:
 			self.log.debug( 'Created sub-pipeline'
-				' {!r} (elements: {})', '.'.join(name), len(es) - es_len0 )
+				' {!r} (elements: {})', '.'.join(name), len(self.es) - es_len0 )
 
 		return e_link_ds, (ea, eb)
 
@@ -283,12 +286,33 @@ class GstPipe(object):
 			self.log.debug(
 				'Message [{m.t}]: {attrs} (src: {src})',
 				m=msg, src=GObjRepr.fmt(msg.src), attrs=attrs )
-		if msg.t == 'error':
-			self.log.error( 'Stopping loop due to'
-				' error: {} (src: {})', msg.gerror, GObjRepr.fmt(msg.src) )
-			self.log.debug( 'Error debug info:'
-				'\n{hr}\n{i}\n{hr}', i=(msg.debug or '').rstrip('\n'), hr='- '*25 )
-			self.loop.quit()
+
+		hook = getattr(self, 'on_bus_{}'.format(msg.t.replace('-', '_')), None)
+		if callable(hook): hook(msg, msg_raw)
+
+
+	def on_bus_error(self, msg, msg_raw):
+		self.log.error( 'Stopping loop due to'
+			' error: {} (src: {})', msg.gerror, GObjRepr.fmt(msg.src) )
+		self.log.debug( 'Error debug info:'
+			'\n{hr}\n{i}\n{hr}', i=(msg.debug or '').rstrip('\n'), hr='- '*25 )
+		self.loop.quit()
+
+	def on_bus_state_changed(self, msg, msg_raw):
+		if not (msg.src == self.graph and msg.new == 'playing'): return
+
+		for e, pads in self.es_print_caps:
+			pads_linked = dict(
+				(pad.get_pad_template().name_template, pad)
+				for pad in e.iterate_pads() if pad.is_linked() )
+			pads = sorted(str_or_list(pads) if pads is not True else pads_linked.keys())
+			for pad in pads:
+				if pad not in pads_linked:
+					self.log.warning( 'Failed to get pas for {}.{} - pad is not linked, all'
+						' linked pads for element: {}', e.get_name(), pad, ', '.join(pads_linked.keys()) )
+					continue
+				caps = pads_linked[pad].get_current_caps()
+				self.log.info('Caps for {}.{}: {}', e.get_name(), pad, caps)
 
 
 
