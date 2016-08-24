@@ -120,11 +120,10 @@ class GstPipe(object):
 		self.create_pipeline()
 
 	def close(self):
-		if self.graph:
+		if self.graph and self.graph_init:
 			self.graph.set_state(Gst.State.NULL)
-			self.graph = None
-		if self.loop:
-			self.loop = None
+		self.graph = None
+		self.loop = None
 
 	def __enter__(self):
 		self.open()
@@ -154,13 +153,14 @@ class GstPipe(object):
 
 
 	def create_pipeline(self):
-		self.graph = Gst.Pipeline.new(self.name)
+		self.graph, self.graph_init = Gst.Pipeline.new(self.name), False
 		self.bus = self.graph.get_bus()
 		self.bus.add_signal_watch()
 		self.bus.connect('message', self.on_bus_msg)
 		self.es, self.es_print_caps = dict(), list()
 		self.create_pipe(self.conf, name=[self.name])
 		self.log.debug('Created gst pipeline {!r} (elements: {})', self.name, len(self.es))
+		self.graph_init = True
 
 
 	def create_pipe(self, conf, e_link_ds=None, name=None):
