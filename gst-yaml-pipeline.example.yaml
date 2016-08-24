@@ -175,3 +175,16 @@ rtpbin:
           props:
             address: 224.0.0.56
             port: 5003
+
+
+## Flat pipeline with delayed linking (due to automagic nature of "decodebin")
+
+filesrc:
+  props:
+    location: test.mp3
+
+decodebin: # will create src pad only upon getting first data
+
+alsasink:
+  link:
+    delay: true

@@ -133,7 +133,7 @@ class GstPipe(object):
 
 
 	def _create_link_cb(self, a, pad_new, pad_check, b, pad_b, link_kws):
-		if pad_check != pad_new.get_pad_template().name_template:
+		if pad_check and pad_check != pad_new.get_pad_template().name_template:
 			self.log.debug(
 				'Skipping non-matching pad-added spec (link: {} -> {}): {} != {}',
 				GObjRepr.fmt(a), GObjRepr.fmt(b), pad_new, pad_check )
@@ -311,6 +311,10 @@ class GstPipe(object):
 		hook = getattr(self, 'on_bus_{}'.format(msg.t.replace('-', '_')), None)
 		if callable(hook): hook(msg, msg_raw)
 
+
+	def on_bus_eos(self, msg, msg_raw):
+		self.log.debug('Stream playback finished, exiting...')
+		self.loop.quit()
 
 	def on_bus_error(self, msg, msg_raw):
 		self.log.error( 'Stopping loop due to'
