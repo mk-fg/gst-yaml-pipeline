@@ -46,7 +46,7 @@ Examples:
   Here all elements are linked source-to-sink in same order as they're
   specified, with no extra properties configured.
 
-* More complex nested rtp-streaming pipeline::
+* More complex nested rtp-streaming pipeline (see `rtpbin docs`_)::
 
     rtpbin:
       pads:
@@ -80,6 +80,8 @@ Examples:
 
   Note that format/structure of stuff under "pipe:" follows exactly same rules
   as top-level config, just gets linked to pad which it's defined under in the end.
+
+  .. _rtpbin docs: https://gstreamer.freedesktop.org/data/doc/gstreamer/head/gst-plugins-good-plugins/html/gst-plugins-good-plugins-rtpbin.html#gst-plugins-good-plugins-rtpbin.description
 
 * Exactly same pipeline as above, but flattened::
 
@@ -131,7 +133,7 @@ Requirements
 * PyYAML_
 * GStreamer_ 1.0+ with GObject-Introspection (gi, gir) python bindings.
 
-To install it all on Debian-likes (plugins and such are optional)::
+To install it all on Debian-likes::
 
   # alias apt='apt --no-install-recommends'
 
@@ -141,5 +143,12 @@ To install it all on Debian-likes (plugins and such are optional)::
 
   # apt install gstreamer1.0-alsa gstreamer1.0-plugins-{base,good}
   # apt install gir1.2-gst-plugins-base-1.0
+
+Arch Linux::
+
+  # pacman -S gstreamer gst-plugins-{base,good} python python-yaml gst-python
+
+In install lines above, plugins and such are optional, though "gst-plugins-bad"
+might also be needed for "rtpopusdepay" in ``gst-yaml-pipeline.example.yaml``.
 
 .. _PyYAML: http://pyyaml.org/
