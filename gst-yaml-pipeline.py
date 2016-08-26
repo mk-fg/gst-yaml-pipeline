@@ -2,7 +2,7 @@
 
 import itertools as it, operator as op, functools as ft
 from collections import ChainMap, Mapping, OrderedDict
-import os, sys, logging, types, re
+import os, sys, logging, types, re, base64
 
 import yaml
 
@@ -25,6 +25,23 @@ class LogStyleAdapter(logging.LoggerAdapter):
 		self.logger._log(level, LogMessage(msg, args, kws), (), log_kws)
 
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
+
+def b64(data):
+	return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
+
+def get_uid_token(chars=4):
+	assert chars * 6 % 8 == 0, chars
+	return b64(os.urandom(chars * 6 // 8))
+
+def log_lines(log_func, lines, log_func_last=False):
+	if isinstance(lines, str): lines = list(line.rstrip() for line in lines.rstrip().split('\n'))
+	uid = get_uid_token()
+	for n, line in enumerate(lines, 1):
+		if isinstance(line, str): line = '[{}] {}', uid, line
+		else: line = ('[{}] {}'.format(uid, line[0]),) + line[1:]
+		if log_func_last and n == len(lines): log_func_last(*line)
+		else: log_func(*line)
+
 
 class GObjRepr(object):
 	_re = re.compile(r'^<.*\((.*?) at 0x(\S+)\)>$')
@@ -107,9 +124,14 @@ class GstPipeError(Exception): pass
 class GstPipe(object):
 
 	loop = graph = None
+	conf_defaults = dmap(
+		pipe=dict(name='yaml-pipe', info=None),
+		e=dict(
+			name=None, info=None, props=dict(), pads=dict(),
+			link=dict(down=True, up=None, delay=False) ) )
 
-	def __init__(self, name, conf, loop=None):
-		self.name, self.conf = name, conf
+	def __init__(self, conf, conf_pipe, loop=None):
+		self.conf_pipe, self.conf = conf_pipe, dmap(conf, self.conf_defaults.pipe)
 		self.loop = loop or GObject.MainLoop()
 		self.log = get_logger('gst.pipe')
 
@@ -166,13 +188,13 @@ class GstPipe(object):
 
 
 	def create_pipeline(self):
-		self.graph, self.graph_init = Gst.Pipeline.new(self.name), False
+		self.graph, self.graph_init = Gst.Pipeline.new(self.conf.name), False
 		self.bus = self.graph.get_bus()
 		self.bus.add_signal_watch()
 		self.bus.connect('message', self.on_bus_msg)
-		self.es, self.es_print_caps = dict(), list()
-		self.create_pipe(self.conf, name=[self.name])
-		self.log.debug('Created gst pipeline {!r} (elements: {})', self.name, len(self.es))
+		self.es, self.es_info = dict(), dmap(caps=list())
+		self.create_pipe(self.conf_pipe, name=[self.conf.name])
+		self.log.debug('Created gst pipeline {!r} (elements: {})', self.conf.name, len(self.es))
 		self.graph_init = True
 
 
@@ -182,12 +204,12 @@ class GstPipe(object):
 
 		es_len0, ea, ab = len(self.es), None, None
 		for e_name, p in conf.items():
-			if not p: p = dict()
+			p = dmap(p or dict(), self.conf_defaults.e)
 
 			### Create
 
 			p_name = e_name.rsplit('/', 1)[0]
-			if p.get('name'): e_name = p['name']
+			if p.name: e_name = p.name
 			self.log.debug('Creating new element: {}', e_name)
 			if e_name in self.es:
 				self.log.error('Duplicate name for element: {!r} (plugin: {})', e_name, p_name)
@@ -196,7 +218,7 @@ class GstPipe(object):
 			if not e:
 				self.log.error('Failed to create element: {!r} (plugin: {})', e_name, p_name)
 				raise GstPipeError('create', e_name, p_name)
-			for k, v in (p.get('props') or dict()).items():
+			for k, v in p.props.items():
 				if k == 'caps': v = Gst.caps_from_string(v.strip())
 				e.set_property(k, v)
 			self.graph.add(e)
@@ -204,10 +226,8 @@ class GstPipe(object):
 
 			### Link
 
-			links = p.get('link') or True
-			links = dmap(
-				dmap(down=links) if not isinstance(links, Mapping) else links,
-				dict(down=True, up=None, delay=False) )
+			links = p.link if isinstance(p.link, Mapping)\
+				else dmap(self.conf_defaults.e.link, down=p.link)
 			# self.log.debug(
 			# '[{}] Flat-linking parameters {} (downstream link: {})...',
 			# e_name, links, GObjRepr.fmt(e_link_ds) )
@@ -231,8 +251,7 @@ class GstPipe(object):
 
 			### Pads and their sub-pipes
 
-			pads = p.get('pads', dict())
-			for pad_name, pad in pads.items():
+			for pad_name, pad in p.pads.items():
 				link_ds, pipe_ends = self.create_pipe(
 					pad.get('pipe', dict()), name=name + [e_name, pad_name] )
 				link = pad.get('link') or 'auto'
@@ -252,8 +271,21 @@ class GstPipe(object):
 				self.create_link( a, b, pad_a, pad_b, caps=pad.get('link_caps'),
 					delay=delay, err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
 
-			pads = p.get('print_caps')
-			if pads: self.es_print_caps.append((e, pads))
+			### Element info
+
+			info = str_or_list(p.info)
+			if info:
+				info_caps = list()
+				for k in info:
+					m = re.search(r'^caps(?:\.(.*))?$', k)
+					if m:
+						if isinstance(info_caps, list):
+							k, m = None, m.group(1)
+							if m: info_caps.append(m)
+							else: info_caps = True
+						continue
+					if k: self.log.warning('Unrecognized "info" type for element {!r}: {}', e_name, k)
+				if info_caps: self.es_info.caps.append((e, info_caps))
 
 		if len(name) > 1:
 			self.log.debug( 'Created sub-pipeline'
@@ -326,7 +358,7 @@ class GstPipe(object):
 	def on_bus_state_changed(self, msg, msg_raw):
 		if not (msg.src == self.graph and msg.new == 'playing'): return
 
-		for e, pads in self.es_print_caps:
+		for e, pads in self.es_info.caps:
 			pads_linked = dict(
 				(pad.get_pad_template().name_template, pad)
 				for pad in e.iterate_pads() if pad.is_linked() )
@@ -339,6 +371,25 @@ class GstPipe(object):
 				caps = pads_linked[pad].get_current_caps()
 				self.log.info('Caps for {}.{}: {}', e.get_name(), pad, caps)
 
+		info = str_or_list(self.conf.info)
+		for k in info:
+			if k == 'latency':
+				lines = list()
+				lines.append('Pipeline latency info (min/max seconds, "L" - live):')
+				for e_name, e in sorted( (e.get_name(), e)
+						for e in it.chain(self.es.values(), [self.graph]) ):
+					q = Gst.Query.new_latency()
+					res = e.query(q)
+					if res:
+						live, *lat_vals = q.parse_latency()
+						lat_vals = list(lat_vals)
+						for n, v in enumerate(lat_vals):
+							if v == Gst.CLOCK_TIME_NONE: lat_vals[n] = 'none'
+							else: lat_vals[n] /= Gst.SECOND
+						lines.append(('[ {:<15s} ] {} {:.4f} / {}', e_name, ' L'[live], *lat_vals))
+					else: print('[{}] query failed!'.format(e_name))
+				log_lines(self.log.info, lines)
+
 
 
 def main(args=None):
@@ -348,8 +399,6 @@ def main(args=None):
 
 	parser.add_argument('conf', nargs='?',
 		help='YAML config with pipeline description. WIll be read from stdin, if omitted.')
-	parser.add_argument('-n', '--name', metavar='name',
-		default='yaml-pipe', help='Gst pipeline name (default: %(default)s).')
 
 	parser.add_argument('-y', '--dry-run',
 		action='store_true', help='Create pipeline and exit, instead of running it.')
@@ -361,10 +410,16 @@ def main(args=None):
 	log = get_logger('main')
 
 	src = sys.stdin if not opts.conf else open(opts.conf)
-	try: conf = yaml_load(src, dmap)
+	try:
+		conf = yaml_load(src, dmap)
+		conf_pipe = conf.pop('pipeline', None)
+		if not conf_pipe: conf, conf_pipe = dmap(), conf
+	except Exception as err:
+		parser.error( 'Failed processing'
+			' configuration file: [{}] {}'.format(err.__class__.__name__, err) )
 	finally: src.close()
 
-	with GstPipe(opts.name, conf) as pipe:
+	with GstPipe(conf, conf_pipe) as pipe:
 		if not opts.dry_run: pipe.run()
 
 if __name__ == '__main__': sys.exit(main())

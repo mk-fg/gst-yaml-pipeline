@@ -66,7 +66,7 @@ Examples:
               props:
                 # host: 224.0.0.56
                 port: 5002
-              print_caps: true # will print caps to be used on receiver(s)
+              info: caps # will print caps to be used on receiver(s)
         send_rtcp_src_0:
           pipe:
             udpsink/rtcp:
@@ -104,7 +104,7 @@ Examples:
       link:
         up: rtpbin.send_rtp_src_0
         down: false
-      print_caps: true
+      info: caps
 
     udpsink/rtcp:
       props:
@@ -117,6 +117,18 @@ Examples:
 
   Demonstrates linking in arbitrary (non-linear and non-nested) fashion between
   any elements.
+
+* Pipeline and script parameters::
+
+    name: my-file-player-pipeline
+    info: latency # will print latency for elements and pipeline itself
+
+    pipeline:
+      filesrc:
+        props:
+          location: test.mp3
+      decodebin: # will create src pad only upon getting first data
+      alsasink: {link: {delay: true}}
 
 Again, see more examples (and format/structure info) in ``gst-yaml-pipeline.example.yaml``.
 

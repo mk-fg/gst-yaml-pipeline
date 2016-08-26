@@ -3,17 +3,20 @@
 ## - All the "...-name" and "...-value" below are placeholders
 ## - Each "element-name" must be unique
 #
+
 ## Flat composition of elements
 #
-# element-name: (value is optional, as is any keys in there)
+# element-name: # value is optional, as is any keys in there
 #
 #   name: # overrides element-name above
 #   plugin-name: # same as pre-/ element-name by default
 #
-#   # "print_caps" can be used to print pad capabilities after whole
-#   #  pipeline gets into "playing" state, i.e. after they've been negotiated
+#   # "info" can be used to log information about elements,
+#   #  for example print pad capabilities after whole pipeline gets
+#   #  into "playing" state, i.e. after they've been negotiated
 #   # Useful for e.g. network streams, where receiver has to know these
-#   print_caps: # can be set to either true, pad name or list of pad names
+#   # Supported values: caps[.pad-name]
+#   info: # can be string or a list of strings for stuff to print/log
 #
 #   link: # can be non-map value, to interpret as "down" option
 #     # "down" can be:
@@ -31,6 +34,7 @@
 # element-name: ... # will be linked as a sink to element above due to "link.down=true"
 # ...
 #
+
 ## Nested linking
 ## Can be combined with flat one above, i.e. use both "link" and "pad" options
 #
@@ -61,6 +65,20 @@
 #     pad-name: ...
 #     ...
 # ... # more downstream or manually linked elements, as with flat example above
+#
+
+## Pipeline parameters
+#
+# name: pipeline-name
+#
+# # "info" for pipeline works in the same way as "info" for elements above
+# # Supported values: latency
+# info: # can be string or a list of strings for stuff to print/log
+#
+# pipeline: # MUST be present
+#   element-name: ...
+#   ...
+#
 
 
 ## Simple flat pipeline:
@@ -70,7 +88,7 @@ audioconvert:
 autoaudiosink:
 
 
-## More complex nested multicast-rtp-streaming pipeline:
+## More complex nested multicast rtp streaming pipeline:
 
 rtpbin:
   pads:
@@ -114,6 +132,11 @@ vorbisenc:
 rtpvorbispay:
   link: rtpbin.send_rtp_sink_0
 
+udpsrc/rtcp:
+  props:
+    port: 5007
+  link: rtpbin.recv_rtcp_sink_0
+
 udpsink/rtp:
   props:
     port: 5002
@@ -127,11 +150,6 @@ udpsink/rtcp:
   link:
     up: rtpbin.send_rtcp_src_0
     down: false
-
-udpsrc/rtcp:
-  props:
-    port: 5007
-  link: rtpbin.recv_rtcp_sink_0
 
 
 ## Nested rtpbin multicast receiver pipeline
@@ -177,14 +195,12 @@ rtpbin:
             port: 5003
 
 
-## Flat pipeline with delayed linking (due to automagic nature of "decodebin")
+## Named flat pipeline with delayed linking (due to automagic nature of "decodebin")
 
-filesrc:
-  props:
-    location: test.mp3
+name: my-file-player-pipeline
+info: latency # will print latency for elements and pipeline itself
 
-decodebin: # will create src pad only upon getting first data
-
-alsasink:
-  link:
-    delay: true
+pipeline: # same pipeline contents as in other examples
+  filesrc: {props: {location: test.mp3}}
+  decodebin: # will create src pad only upon getting first data
+  alsasink: {link: {delay: true}}
