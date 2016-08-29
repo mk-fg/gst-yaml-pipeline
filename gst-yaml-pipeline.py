@@ -161,12 +161,14 @@ class GstPipe(object):
 				'Skipping non-matching pad-added spec (link: {} -> {}): {} != {}',
 				GObjRepr.fmt(a), GObjRepr.fmt(b), pad_new, pad_check )
 			return
-		self.log.debug('Delayed linking event for: {}', err_info.l)
+		self.log.debug( 'Delayed linking event'
+			' for: {} (src pad: {})', err_info.l, pad_new.get_name() )
 		link_args = link_state.pop('args', None)
 		if link_args:
-			a, b, pad_a, pad_b = link_args
-			self.log.debug('Removing old link {} (pad_b: {})', err_info.l, pad_b)
-			a.unlink_pads(pad_a, b, pad_b)
+			a, b, pad_a, pad_b_old = link_args
+			self.log.debug( 'Removing old link'
+				' {} (pads: {} -> {})', err_info.l, pad_a, pad_b_old )
+			a.unlink_pads(pad_a, b, pad_b_old)
 		link_args = [a, b, pad_new.get_name(), pad_b]
 		link_kws = dict(caps=caps, err_info=err_info)
 		if not pad_b: # must be resolved here for later unlinking
@@ -185,17 +187,19 @@ class GstPipe(object):
 				d=optional True/False to add "downstream"/"upstream" ).
 			err_fake - raise error without even trying to link.'''
 		if isinstance(caps, str): caps = Gst.caps_from_string(caps.strip())
-		if not err_info or not err_info.get('l'):
-			err_info = dmap(err_info or dict(), dict.fromkeys('dept'))
-			err_info.l = '{}.{} -> {}.{}{}'.format(
-				GObjRepr.fmt(a), pad_a or '(any)',
-				GObjRepr.fmt(b), pad_b or '(any)',
-				' [{}]'.format(caps.strip()) if caps else '' )
+		err_info = dmap(dict(), err_info or dict(), dict.fromkeys('depth'))
+		link_id = id(a), id(b), pad_a, pad_b
+		if err_info.h != link_id:
+			err_info.update( h=link_id,
+				l='{}.{} -> {}.{}{}'.format(
+					GObjRepr.fmt(a), pad_a or '(any)',
+					GObjRepr.fmt(b), pad_b or '(any)',
+					' [{}]'.format(caps.strip()) if caps else '' ) )
 		if delay:
 			a.connect( 'pad-added',
 				self._create_link_cb, pad_a, b, pad_b, caps, err_info, dict() )
 			return
-		self.log.debug('Link {}', err_info.l)
+		self.log.debug('New link: {}', err_info.l)
 		if not err_fake and a.link_pads_filtered(pad_a, b, pad_b, caps): return
 		err_t, err_ext = 'link', list()
 		if err_info.d: err_ext.append('downstream' if err_info.d else 'upstream')
