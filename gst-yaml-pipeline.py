@@ -154,37 +154,57 @@ class GstPipe(object):
 	def __del__(self): self.close()
 
 
-	def _create_link_cb(self, a, pad_new, pad_check, b, pad_b, link_kws):
+	def _create_link_cb( self,
+			a, pad_new, pad_check, b, pad_b, caps, err_info, link_state ):
 		if pad_check and pad_check != pad_new.get_pad_template().name_template:
 			self.log.debug(
 				'Skipping non-matching pad-added spec (link: {} -> {}): {} != {}',
 				GObjRepr.fmt(a), GObjRepr.fmt(b), pad_new, pad_check )
 			return
-		self.create_link(a, b, pad_new.get_name(), pad_b, **link_kws)
+		self.log.debug('Delayed linking event for: {}', err_info.l)
+		link_args = link_state.pop('args', None)
+		if link_args:
+			a, b, pad_a, pad_b = link_args
+			self.log.debug('Removing old link {} (pad_b: {})', err_info.l, pad_b)
+			a.unlink_pads(pad_a, b, pad_b)
+		link_args = [a, b, pad_new.get_name(), pad_b]
+		link_kws = dict(caps=caps, err_info=err_info)
+		if not pad_b: # must be resolved here for later unlinking
+			pad_b = b.get_compatible_pad(pad_new, caps)
+			if pad_b: link_args[-1] = pad_b.get_name()
+			else: link_kws['err_fake'] = True # no point trying it again there
+		self.create_link(*link_args, **link_kws)
+		link_state['args'] = link_args
 
-	def create_link(self, a, b, pad_a=None, pad_b=None, delay=False, caps=None, err_info=''):
+	def create_link( self,
+			a, b, pad_a=None, pad_b=None,
+			delay=False, caps=None, err_info=None, err_fake=False ):
+		'''delay - link pads on "pad-added" event.
+			err_info - optional info to format error with - dict(
+				e=element-name, p=plugin-name, t=optional error-suffix,
+				d=optional True/False to add "downstream"/"upstream" ).
+			err_fake - raise error without even trying to link.'''
+		if isinstance(caps, str): caps = Gst.caps_from_string(caps.strip())
+		if not err_info or not err_info.get('l'):
+			err_info = dmap(err_info or dict(), dict.fromkeys('dept'))
+			err_info.l = '{}.{} -> {}.{}{}'.format(
+				GObjRepr.fmt(a), pad_a or '(any)',
+				GObjRepr.fmt(b), pad_b or '(any)',
+				' [{}]'.format(caps.strip()) if caps else '' )
 		if delay:
-			a.connect( 'pad-added', self._create_link_cb,
-				pad_a, b, pad_b, dict(caps=caps, err_info=err_info) )
+			a.connect( 'pad-added',
+				self._create_link_cb, pad_a, b, pad_b, caps, err_info, dict() )
 			return
-		link_repr = '{}.{} -> {}.{}{}'.format(
-			GObjRepr.fmt(a), pad_a or '(any)',
-			GObjRepr.fmt(b), pad_b or '(any)',
-			' [{}]'.format(caps.strip()) if caps else '' )
-		self.log.debug('Link {}', link_repr)
-		if caps: caps = Gst.caps_from_string(caps.strip())
-		if a.link_pads_filtered(pad_a, b, pad_b, caps): return
-		err_dict = dmap(err_info or dict(), dict.fromkeys('dept'))
-		if err_info:
-			err_info = list()
-			if err_dict.d: err_info.append('downstream' if err_dict.d else 'upstream')
-			if err_dict.e: err_info.append('element: {}'.format(err_dict.e))
-			if err_dict.p: err_info.append('plugin: {}'.format(err_dict.p))
-			err_info = ' ({})'.format(', '.join(err_info))
-		self.log.error('Failed to create link: {}{}', link_repr, err_info)
-		err_t = 'link'
-		if err_dict.t: err_t += '-{}'.format(err_dict.t)
-		raise GstPipeError(err_t, err_dict.e, err_dict.p, a, pad_a, b, pad_b, caps)
+		self.log.debug('Link {}', err_info.l)
+		if not err_fake and a.link_pads_filtered(pad_a, b, pad_b, caps): return
+		err_t, err_ext = 'link', list()
+		if err_info.d: err_ext.append('downstream' if err_info.d else 'upstream')
+		if err_info.e: err_ext.append('element: {}'.format(err_info.e))
+		if err_info.p: err_ext.append('plugin: {}'.format(err_info.p))
+		if err_info.t: err_t += '-{}'.format(err_info.t)
+		err_ext = ' ({})'.format(', '.join(err_ext)) if err_ext else ''
+		self.log.error('Failed to create link: {}{}', err_info.l, err_ext)
+		raise GstPipeError(err_t, err_dict.e, err_info.p, a, pad_a, b, pad_b, caps)
 
 
 	def create_pipeline(self):
