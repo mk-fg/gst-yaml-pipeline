@@ -8,7 +8,7 @@ import yaml
 
 import gi
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GObject
+from gi.repository import Gst, GObject, GLib
 
 
 class LogMessage(object):
@@ -123,7 +123,7 @@ class GstPipeError(Exception): pass
 
 class GstPipe(object):
 
-	loop = graph = None
+	loop = graph = status = error = None
 	conf_defaults = dmap(
 		pipe=dict(name='yaml-pipe', info=None),
 		e=dict(
@@ -218,8 +218,9 @@ class GstPipe(object):
 		self.bus.connect('message', self.on_bus_msg)
 		self.es, self.es_info = dict(), dmap(caps=list())
 		self.create_pipe(self.conf_pipe, name=[self.conf.name])
-		self.log.debug('Created gst pipeline {!r} (elements: {})', self.conf.name, len(self.es))
-		self.graph_init = True
+		info = 'gst pipeline {!r} (elements: {})'.format(self.conf.name, len(self.es))
+		self.log.debug('Created {}', info)
+		self.graph_init, self.status = True, 'Running {}'.format(info)
 
 
 	def create_pipe(self, conf, e_link_ds=None, name=None):
@@ -377,6 +378,7 @@ class GstPipe(object):
 			' error: {} (src: {})', msg.gerror, GObjRepr.fmt(msg.src) )
 		self.log.debug( 'Error debug info:'
 			'\n{hr}\n{i}\n{hr}', i=(msg.debug or '').rstrip('\n'), hr='- '*25 )
+		self.error = True
 		self.loop.quit()
 
 	def on_bus_state_changed(self, msg, msg_raw):
@@ -424,6 +426,8 @@ def main(args=None):
 	parser.add_argument('conf', nargs='?',
 		help='YAML config with pipeline description. WIll be read from stdin, if omitted.')
 
+	parser.add_argument('--systemd', action='store_true',
+		help='Use systemd service notification/watchdog mechanisms, if available.')
 	parser.add_argument('-y', '--dry-run',
 		action='store_true', help='Create pipeline and exit, instead of running it.')
 	parser.add_argument('-d', '--debug', action='store_true', help='Verbose operation mode.')
@@ -432,6 +436,35 @@ def main(args=None):
 	global log
 	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.INFO)
 	log = get_logger('main')
+
+	if opts.systemd:
+		from systemd import daemon
+		import time
+		def sd_cycle(ts=None, status_init=None):
+			if not sd_cycle.ready:
+				daemon.notify('READY=1')
+				sd_cycle.update_status(status_init or 'Started')
+				sd_cycle.ready = True
+			if sd_cycle.delay:
+				if ts is None: ts = time.monotonic()
+				delay = sd_cycle.ts_next - ts
+				if delay <= 0:
+					sd_cycle.ts_next += sd_cycle.delay
+					if sd_cycle.wdt: daemon.notify('WATCHDOG=1')
+			else: sd_cycle.ts_next = None
+			return True
+		sd_cycle.update_status = lambda status:\
+			daemon.notify('STATUS={}'.format(status))
+		sd_cycle.ts_next = time.monotonic()
+		wd_pid, wd_usec = (os.environ.get(k) for k in ['WATCHDOG_PID', 'WATCHDOG_USEC'])
+		if wd_pid and wd_pid.isdigit() and int(wd_pid) == os.getpid():
+			wd_interval = float(wd_usec) / 2e6 # half of interval in seconds
+			assert wd_interval > 0, wd_interval
+			log.debug('Initializing systemd watchdog pinger with interval: {}s', wd_interval)
+			sd_cycle.wdt, sd_cycle.delay = True, wd_interval
+		else: sd_cycle.wdt, sd_cycle.delay = False, None
+		sd_cycle.ready = False
+	else: sd_cycle = None
 
 	src = sys.stdin if not opts.conf else open(opts.conf)
 	try:
@@ -443,7 +476,13 @@ def main(args=None):
 			' configuration file: [{}] {}'.format(err.__class__.__name__, err) )
 	finally: src.close()
 
-	with GstPipe(conf, conf_pipe) as pipe:
+	loop, ev_hooks = GLib.MainLoop(), list()
+	with GstPipe(conf, conf_pipe, loop=loop) as pipe:
+		if sd_cycle and sd_cycle.wdt:
+			ev_hooks.append(GLib.timeout_add(sd_cycle.delay * 1000, sd_cycle))
+			sd_cycle(status_init=pipe.status)
 		if not opts.dry_run: pipe.run()
+		for src_id in ev_hooks: GLib.source_remove(src_id)
+		return int(bool(pipe.error))
 
 if __name__ == '__main__': sys.exit(main())

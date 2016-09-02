@@ -158,6 +158,8 @@ rtpbin:
   pads:
 
     recv_rtp_src_%u_%u_%u: # automatically used as a template for delayed linking
+      # Note that this pad will be destroyed and re-appear on rtp stream restarts,
+      #  and will be automatically re-linked to elements defined here - that's how "link_delay" works
       pipe:
         rtpopusdepay:
         opusdec:

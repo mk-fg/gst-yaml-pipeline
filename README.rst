@@ -132,10 +132,30 @@ Examples:
 
 Again, see more examples (and format/structure info) in ``gst-yaml-pipeline.example.yaml``.
 
-Invocation: ``./gst-yaml-pipeline.py --debug my-pipeline.yaml``
+Running the thing: ``./gst-yaml-pipeline.py --debug my-pipeline.yaml``
 
 | Enable gst debug messages: ``GST_DEBUG='*:4' GST_DEBUG_NO_COLOR=1 ./gst-yaml-pipeline.py ...``
 | (see also ``ENVIRONMENT VARIABLES`` section in ``man gst-launch-1.0``)
+
+To run such pipeline on a more permanent basis from systemd unit::
+
+  [Service]
+  Type=notify
+  User=gst-pipe
+  ExecStart=/srv/gst-pipe/gst-yaml-pipeline --systemd /gst-pipe/pipeline.yaml
+
+  WatchdogSec=90
+  Restart=on-failure
+	RestartSec=3
+	StartLimitInterval=8min
+	StartLimitBurst=10
+
+  Environment=GST_DEBUG=*:3
+  Environment=GST_DEBUG_NO_COLOR=1
+
+(requires python-systemd_ module for --systemd option to work)
+
+.. _python-systemd: https://github.com/systemd/python-systemd
 
 
 Requirements
@@ -144,8 +164,9 @@ Requirements
 * Python 3.x
 * PyYAML_
 * GStreamer_ 1.0+ with GObject-Introspection (gi, gir) python bindings.
+* (optional) python-systemd_ - only when --systemd option is used
 
-To install it all on Debian-likes::
+To install required deps on Debian-likes::
 
   # alias apt='apt --no-install-recommends'
 
