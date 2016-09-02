@@ -44,14 +44,12 @@ def log_lines(log_func, lines, log_func_last=False):
 
 
 class GObjRepr(object):
-	_re = re.compile(r'^<.*\((.*?) at 0x(\S+)\)>$')
-	def __init__(self, m): self.m = m
-	def __repr__(self): return '<{} {}>'.format(*self.m.groups())
+	def __init__(self, t, addr): self.t, self.addr = t, addr
+	def __repr__(self): return '<{} {:x}>'.format(self.t, self.addr)
 	@classmethod
 	def fmt(cls, gobj):
 		if not isinstance(gobj, GObject.Object): return gobj
-		m = cls._re.search(str(gobj))
-		return gobj if not m else cls(m)
+		return cls(gobj.__gtype__.name, id(gobj))
 
 def yaml_load(stream, dict_cls=OrderedDict, loader_cls=yaml.SafeLoader):
 	class CustomLoader(loader_cls): pass
@@ -116,6 +114,18 @@ class dmap(ChainMap):
 
 str_or_list = lambda v: ([v] if not isinstance(
 	v or list(), (types.GeneratorType, list, tuple) ) else list(v or list()))
+
+def gobj_interval_cb(func):
+	def _wrapper(*args, **kws):
+		try: func(*args, **kws)
+		except Exception as err:
+			log.exception( 'GLib loop interval callback'
+				' ({}) failed: [{}] {}', func, err.__class__.__name__, err )
+		return True # never cancel future calls
+	return _wrapper
+
+gobj_type_check = lambda gobj, t:\
+	isinstance(gobj, GObject.Object) and gobj.__gtype__.name == t
 
 
 
@@ -345,35 +355,42 @@ class GstPipe(object):
 					( lambda msg,func='parse_{}'.format(k),args=args:
 						(args, zip(args, ret_list_wrap(args, getattr(msg, func)()))) )
 			def _bus_msg_parse(msg_raw):
-				if msg_raw.type not in p: msg = dmap(raw=msg_raw)
-				else:
+				if msg_raw.type == Gst.MessageType.ELEMENT:
+					msg = dmap(struct=msg_raw.get_structure())
+					msg._set_attr('_args', ('struct',))
+				elif msg_raw.type in p:
 					msg = p[msg_raw.type](msg_raw)
 					msg_args, msg = msg if msg else [tuple(), dict()]
 					msg = dmap((k, v if not isinstance( v,
 						GObject.GEnum ) else v.value_nick) for k, v in msg)
 					msg._set_attr('_args', msg_args)
+				else: msg = dmap()
+				msg._set_attr('_raw', msg_raw)
 				msg.t, msg.src = msg_raw.type.first_value_nick, msg_raw.src
 				msg.seq, msg.ts = msg_raw.seqnum, msg_raw.timestamp
 				return msg
 			self._bus_msg_parse = _bus_msg_parse
+
 		msg = self._bus_msg_parse(msg_raw)
 		if self.log.isEnabledFor(logging.DEBUG): # to avoid formatting stuff
-			attrs = getattr(msg, '_args', None)
-			attrs = msg.raw if attrs is None else\
-				dict((k, GObjRepr.fmt(msg[k])) for k in attrs)
+			if msg.t == 'element': attrs = '<GstStructure {!r}>'.format(msg.struct.to_string())
+			else:
+				attrs = getattr(msg, '_args', None)
+				attrs = msg._raw if attrs is None else\
+					dict((k, GObjRepr.fmt(msg[k])) for k in attrs)
 			self.log.debug(
 				'Message [{m.t}]: {attrs} (src: {src})',
 				m=msg, src=GObjRepr.fmt(msg.src), attrs=attrs )
 
 		hook = getattr(self, 'on_bus_{}'.format(msg.t.replace('-', '_')), None)
-		if callable(hook): hook(msg, msg_raw)
+		if callable(hook): hook(msg)
 
 
-	def on_bus_eos(self, msg, msg_raw):
+	def on_bus_eos(self, msg):
 		self.log.debug('Stream playback finished, exiting...')
 		self.loop.quit()
 
-	def on_bus_error(self, msg, msg_raw):
+	def on_bus_error(self, msg):
 		self.log.error( 'Stopping loop due to'
 			' error: {} (src: {})', msg.gerror, GObjRepr.fmt(msg.src) )
 		self.log.debug( 'Error debug info:'
@@ -381,7 +398,7 @@ class GstPipe(object):
 		self.error = True
 		self.loop.quit()
 
-	def on_bus_state_changed(self, msg, msg_raw):
+	def on_bus_state_changed(self, msg):
 		if not (msg.src == self.graph and msg.new == 'playing'): return
 
 		for e, pads in self.es_info.caps:
@@ -479,7 +496,8 @@ def main(args=None):
 	loop, ev_hooks = GLib.MainLoop(), list()
 	with GstPipe(conf, conf_pipe, loop=loop) as pipe:
 		if sd_cycle and sd_cycle.wdt:
-			ev_hooks.append(GLib.timeout_add(sd_cycle.delay * 1000, sd_cycle))
+			ev_hooks.append(GLib.timeout_add(
+				int(sd_cycle.delay * 1000), gobj_interval_cb(sd_cycle) ))
 			sd_cycle(status_init=pipe.status)
 		if not opts.dry_run: pipe.run()
 		for src_id in ev_hooks: GLib.source_remove(src_id)
