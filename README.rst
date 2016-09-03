@@ -146,9 +146,9 @@ To run such pipeline on a more permanent basis from systemd unit::
 
   WatchdogSec=90
   Restart=on-failure
-	RestartSec=3
-	StartLimitInterval=8min
-	StartLimitBurst=10
+  RestartSec=3
+  StartLimitInterval=8min
+  StartLimitBurst=10
 
   Environment=GST_DEBUG=*:3
   Environment=GST_DEBUG_NO_COLOR=1
