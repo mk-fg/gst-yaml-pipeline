@@ -72,8 +72,7 @@ Examples:
             udpsink/rtcp:
               props:
                 port: 5003
-                sync: false
-                async: false
+                # sync: false
 
   A tree with "rtpbin" pads connected to audio source/encoding pipeline and UDP
   inputs/outputs, each with their respective configuration.
@@ -86,7 +85,7 @@ Examples:
 * Exactly same pipeline as above, but flattened::
 
     rtpbin:
-      link: false
+      link: none
 
     audiotestsrc:
     opusenc:
@@ -101,19 +100,13 @@ Examples:
     udpsink/rtp:
       props:
         port: 5002
-      link:
-        up: rtpbin.send_rtp_src_0
-        down: false
+      link: <rtpbin.send_rtp_src_0
       info: caps
 
     udpsink/rtcp:
       props:
         port: 5003
-        sync: false
-        async: false
-      link:
-        up: rtpbin.send_rtcp_src_0
-        down: false
+      link: <rtpbin.send_rtcp_src_0
 
   Demonstrates linking in arbitrary (non-linear and non-nested) fashion between
   any elements.
@@ -128,7 +121,7 @@ Examples:
         props:
           location: test.mp3
       decodebin: # will create src pad only upon getting first data
-      alsasink: {link: {delay: true}}
+      alsasink: {link: delay}
 
 Again, see more examples (and format/structure info) in ``gst-yaml-pipeline.example.yaml``.
 

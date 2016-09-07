@@ -112,7 +112,7 @@ class dmap(ChainMap):
 		for m in self.maps:
 			if k in m: del m[k]
 
-str_or_list = lambda v: ([v] if not isinstance(
+str_or_list = lambda v: filter(None, v.split() if not isinstance(
 	v or list(), (types.GeneratorType, list, tuple) ) else list(v or list()))
 
 def gobj_interval_cb(func):
@@ -123,6 +123,11 @@ def gobj_interval_cb(func):
 				' ({}) failed: [{}] {}', func, err.__class__.__name__, err )
 		return True # never cancel future calls
 	return _wrapper
+
+def gobj_iter_list(gobj):
+	iter_list = list()
+	gobj.foreach(iter_list.append)
+	return iter_list
 
 gobj_type_check = lambda gobj, t:\
 	isinstance(gobj, GObject.Object) and gobj.__gtype__.name == t
@@ -136,9 +141,7 @@ class GstPipe(object):
 	loop = graph = status = error = None
 	conf_defaults = dmap(
 		pipe=dict(name='yaml-pipe', info=None),
-		e=dict(
-			name=None, info=None, props=dict(), pads=dict(),
-			link=dict(down=True, up=None, delay=False) ) )
+		e=dict(name=None, info=None, link='down', props=dict(), pads=dict()) )
 
 	def __init__(self, conf, conf_pipe, loop=None):
 		self.conf_pipe, self.conf = conf_pipe, dmap(conf, self.conf_defaults.pipe)
@@ -218,7 +221,7 @@ class GstPipe(object):
 		if err_info.t: err_t += '-{}'.format(err_info.t)
 		err_ext = ' ({})'.format(', '.join(err_ext)) if err_ext else ''
 		self.log.error('Failed to create link: {}{}', err_info.l, err_ext)
-		raise GstPipeError(err_t, err_dict.e, err_info.p, a, pad_a, b, pad_b, caps)
+		raise GstPipeError(err_t, err_info.e, err_info.p, a, pad_a, b, pad_b, caps)
 
 
 	def create_pipeline(self):
@@ -261,48 +264,44 @@ class GstPipe(object):
 
 			### Link
 
-			links = p.link if isinstance(p.link, Mapping)\
-				else dmap(self.conf_defaults.e.link, down=p.link)
-			# self.log.debug(
-			# '[{}] Flat-linking parameters {} (downstream link: {})...',
-			# e_name, links, GObjRepr.fmt(e_link_ds) )
-
+			link = dict.fromkeys(str_or_list(p.link), True)
+			delay = link.pop('delay', False)
 			if e_link_ds:
-				self.create_link( e_link_ds, e, delay=links.delay,
+				self.create_link( e_link_ds, e, delay=delay,
 					err_info=dict(e=e_name, p=p_name, t='downstream') )
 				e_link_ds = None
-
-			if links.down is True: e_link_ds = e
-			for pad_dir, swap, specs in [('>', False, links.down), ('<', True, links.up)]:
-				if specs is True: continue
-				for spec in str_or_list(specs):
-					pad_a = pad_b = None
-					if pad_dir in spec: pad_a, spec = spec.split('<', 1)
-					if '.' in spec: spec, pad_b = spec.rsplit('.', 1)
-					a, b = e, self.es[spec]
-					if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
-					self.create_link( a, b, pad_a, pad_b, delay=links.delay,
-						err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
+			if link.pop('down', False) or not link: e_link_ds = e
+			if 'none' in link: link.clear()
+			for spec in link:
+				m = re.search(r'^(?:([^<>]+)?([<>]))?([^.]+)(?:\.(.*))$', spec)
+				if not m: raise ValueError('Invalid pad-link spec: {!r}', spec)
+				a, (pad_a, swap, b, pad_b) = e, m.groups()
+				swap, b = '><'.index(swap or '>'), self.es[b]
+				if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
+				delay = delay or (isinstance(pad_a, str) and '%' in pad_a)
+				self.create_link( a, b, pad_a, pad_b, caps=p.get('link_caps'),
+					delay=delay, err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
 
 			### Pads and their sub-pipes
 
 			for pad_name, pad in p.pads.items():
 				link_ds, pipe_ends = self.create_pipe(
 					pad.get('pipe', dict()), name=name + [e_name, pad_name] )
-				link = pad.get('link') or 'auto'
-				if link == 'auto': link = 'up' if re.search(r'([-_]|\b)sink([-_]|\b)', pad_name) else 'down'
-				link = {'<': 'up', '>': 'down'}.get(link, link)
-				if link == 'up':
+				link = dict.fromkeys(str_or_list(pad.get('link') or 'auto'), True)
+				delay = link.pop('delay', False)
+				if link.pop('auto', False):
+					link['up' if re.search(r'([-_]|\b)sink([-_]|\b)', pad_name) else 'down'] = True
+				if any([link.pop('up', False), link.pop('<', False)]):
 					swap, a, pad_a, b, pad_b = True, e, pad_name, pipe_ends[1], None
-				elif link == 'down':
+				elif any([link.pop('down', False), link.pop('<', False)]):
 					swap, a, pad_a, b, pad_b = False, e, pad_name, pipe_ends[0], None
-				else:
-					m = re.search(r'^([<>])([^.]*)(?:\.(.*))$', link)
-					if not m: raise ValueError('Invalid pad-link spec: {!r}', link)
+				for spec in link:
+					m = re.search(r'^([<>])?([^.]*)(?:\.(.*))$', spec)
+					if not m: raise ValueError('Invalid pad-link spec: {!r}', spec)
 					a, pad_a, (swap, b, pad_b) = e, pad_name, m.groups()
-					swap, b = '><'.index(swap), self.es[b] if b else pipe_ends[swap == '<']
+					swap, b = '><'.index(swap or '>'), self.es[b] if b else pipe_ends[swap == '<']
 				if swap: (a, b), (pad_a, pad_b) = (b, a), (pad_b, pad_a)
-				delay = pad.get('link_delay') or (isinstance(pad_a, str) and '%' in pad_a)
+				delay = delay or (isinstance(pad_a, str) and '%' in pad_a)
 				self.create_link( a, b, pad_a, pad_b, caps=pad.get('link_caps'),
 					delay=delay, err_info=dict(e=e_name, p=p_name, d=not swap, t='pads') )
 
@@ -404,7 +403,7 @@ class GstPipe(object):
 		for e, pads in self.es_info.caps:
 			pads_linked = dict(
 				(pad.get_pad_template().name_template, pad)
-				for pad in e.iterate_pads() if pad.is_linked() )
+				for pad in gobj_iter_list(e.iterate_pads()) if pad.is_linked() )
 			pads = sorted(str_or_list(pads) if pads is not True else pads_linked.keys())
 			for pad in pads:
 				if pad not in pads_linked:
