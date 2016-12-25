@@ -202,3 +202,33 @@ pipeline: # same pipeline contents as in other examples
   filesrc: {props: {location: test.mp3}}
   decodebin: # will create src pad only upon getting first data
   alsasink: {link: delay}
+
+
+## Receive/play rtp stream from pulseaudio module-rtp-send destination=224.0.0.56 port=9876
+
+# Dump SDP payload: tcpdump -i enp1s0 -nn -X 'udp port 9875'
+# SDP format:
+#  v=<version>
+#  o=<username> <sess-id> <sess-version> IN IP4 <ip4-addr>
+#  c=IN IP4 <ip4-addr>
+#  s=<human-description>
+#  m=<media> <udp port> RTP/AVP <payload>
+#  a=rtpmap:<payload> <encoding-name>/<clock-rate>[/<encoding-params>]
+#  a=fmtp:<payload> <param>=<value>;...
+
+name: pulse-rtp-recv
+
+pipeline:
+  udpsrc:
+    props:
+      multicast-iface: enp1s0
+      address: 224.0.0.56
+      port: 9876
+      caps: >
+        application/x-rtp, media=(string)audio, clock-rate=(int)44100,
+        encoding-name=(string)L16, payload=(int)10, encoding-params=(string)2
+  rtpjitterbuffer:
+    props:
+      latency: 200
+  rtpL16depay:
+  pulsesink:
