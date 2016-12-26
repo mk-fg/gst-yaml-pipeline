@@ -411,7 +411,7 @@ class GstPipe(object):
 						' linked pads for element: {}', e.get_name(), pad, ', '.join(pads_linked.keys()) )
 					continue
 				caps = pads_linked[pad].get_current_caps()
-				self.log.info('Caps for {}.{}: {}', e.get_name(), pad, caps)
+				self.log.info('Caps for {}.{}: {}', e.get_name(), pad, caps.to_string())
 
 		info = str_or_list(self.conf.info)
 		for k in info:
